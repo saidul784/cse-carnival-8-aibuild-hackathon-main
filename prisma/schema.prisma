@@ -1,0 +1,210 @@
+// CampusOS — database schema
+//
+// SOURCE OF TRUTH: schema/schema.md
+// Field names and types below mirror schema/schema.md exactly, so that API
+// responses match the documented contract with no translation layer.
+//
+// Modelling notes (each one is an interpretation forced by SQLite/Prisma or by
+// the actual contents of data/*.json — all are documented in the phase report):
+//
+//  1. Dates and times are stored as String, exactly as schema/schema.md
+//     specifies ("YYYY-MM-DD" and 24h "HH:MM"). ISO-8601 and zero-padded
+//     HH:MM sort and range-compare correctly as text, and storing them as
+//     text avoids timezone drift on date-only values.
+//  2. Prisma does not support `enum` on SQLite. Every documented enum
+//     (day, type, status, priority) is a String; the allowed values are
+//     enforced by validation in the service layer.
+//  3. Prisma does not support scalar lists (String[]) on SQLite. Room
+//     `equipment` is therefore a related table, which also makes the
+//     documented `equipment.includes("projector")` filter indexable.
+//  4. Schedule.room and Event.venue are plain Strings with NO foreign key.
+//     data/schedules.json references rooms 7C07 (sch-011, sch-012) and 9A05
+//     (sch-020) which do not exist in data/rooms.json. A foreign key here
+//     would make the seed data unloadable.
+//  5. Event.registered is its own column, never derived from the
+//     registrations relation. In all 7 seed events `registered` differs from
+//     registrations.length (e.g. evt-001: 47 vs 3) — the array is a partial
+//     roster and `registered` is the authoritative count.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// schema/schema.md §1 — Schedules
+model Schedule {
+  id         String @id
+  course     String
+  title      String
+  day        String // Sunday | Monday | Tuesday | Wednesday | Thursday
+  start_time String // "HH:MM"
+  end_time   String // "HH:MM"
+  room       String // room number; deliberately NOT a foreign key (note 4)
+  instructor String // may be "TBA"
+  section    String
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([day])
+  @@index([course])
+  @@index([room])
+  @@map("schedules")
+}
+
+/// schema/schema.md §2 — Rooms
+model Room {
+  id          String @id
+  room_number String @unique
+  type        String // classroom | lab | seminar
+  capacity    Int
+  floor       Int
+  status      String // available | unavailable
+
+  equipment RoomEquipment[]
+  bookings  Booking[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([type])
+  @@index([capacity])
+  @@map("rooms")
+}
+
+/// One entry of schema/schema.md §2 `equipment: string[]`.
+/// Modelled relationally because SQLite has no array type (note 3).
+model RoomEquipment {
+  id      Int    @id @default(autoincrement())
+  room_id String
+  name    String
+
+  room Room @relation(fields: [room_id], references: [id], onDelete: Cascade)
+
+  @@unique([room_id, name])
+  @@index([name])
+  @@map("room_equipment")
+}
+
+/// schema/schema.md §2 — Booking Object (inside rooms.bookings)
+model Booking {
+  booking_id String @id
+  room_id    String
+  booked_by  String
+  date       String // "YYYY-MM-DD"
+  start_time String // "HH:MM"
+  end_time   String // "HH:MM"
+  purpose    String
+
+  room Room @relation(fields: [room_id], references: [id], onDelete: Cascade)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([room_id, date])
+  @@index([date])
+  @@map("bookings")
+}
+
+/// schema/schema.md §3 — Events
+model Event {
+  id          String @id
+  name        String
+  description String
+  date        String // "YYYY-MM-DD"
+  start_time  String // "HH:MM"
+  end_time    String // "HH:MM"
+  end_date    String // "YYYY-MM-DD"; may differ from `date` (evt-001 spans 2 days)
+  venue       String // room number; deliberately NOT a foreign key (note 4)
+  organizer   String
+  capacity    Int
+  registered  Int // authoritative count, never derived (note 5)
+  status      String // upcoming | ongoing | completed | cancelled | full
+
+  registrations Registration[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([date])
+  @@index([status])
+  @@map("events")
+}
+
+/// schema/schema.md §3 — Registration Object (inside events.registrations)
+/// `student_id` is unique per event, not globally, so the primary key is
+/// synthetic and uniqueness is enforced on the pair. That pair constraint is
+/// also what makes duplicate registration impossible.
+model Registration {
+  id         Int    @id @default(autoincrement())
+  event_id   String
+  student_id String
+  name       String
+
+  event Event @relation(fields: [event_id], references: [id], onDelete: Cascade)
+
+  created_at DateTime @default(now())
+
+  @@unique([event_id, student_id])
+  @@index([student_id])
+  @@map("registrations")
+}
+
+/// schema/schema.md §4 — Announcements
+model Announcement {
+  id        String @id
+  title     String
+  body      String
+  date      String // "YYYY-MM-DD"
+  priority  String // high | medium | low
+  posted_by String
+  expires   String // "YYYY-MM-DD"
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([priority])
+  @@index([date])
+  @@index([expires])
+  @@map("announcements")
+}
+
+/// schema/schema.md §5 — Assignments
+model Assignment {
+  id                  String @id
+  course              String
+  course_title        String
+  title               String
+  description         String
+  assigned_date       String // "YYYY-MM-DD"
+  deadline            String // "YYYY-MM-DD"
+  submission_platform String
+  status              String // pending | submitted | graded | late
+  marks               Int
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([deadline])
+  @@index([status])
+  @@index([course])
+  @@map("assignments")
+}
+
+/// Not part of schema/schema.md. Records that a seed dataset has already been
+/// loaded, so startup seeding is idempotent and never overwrites changes made
+/// through the dashboard or the agent (README.md: changes "still be there
+/// after a reload").
+model SeedMarker {
+  id           Int      @id @default(autoincrement())
+  key          String   @unique
+  source       String
+  record_count Int
+  seeded_at    DateTime @default(now())
+
+  @@map("seed_markers")
+}
